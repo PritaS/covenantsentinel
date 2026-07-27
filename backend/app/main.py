@@ -17,9 +17,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import covenant_engine as engine_mod
+from .extraction import pipeline as extraction_pipeline
 from .models import (Alert, AlertSeverity, AuditLog, Base, CovenantTerm,
-                     CovenantTestResult, FinancialPeriod, Loan, Property,
-                     Tenant, TermStatus, TestOutcome)
+                     CovenantTestResult, CovenantType, FinancialPeriod, Loan,
+                     Property, RateType, Tenant, TermStatus, TestOutcome)
 
 DATABASE_URL = "sqlite:///./covenantsentinel.db"  # prod: Postgres via env
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -67,6 +68,87 @@ def ingest_financials(payload: FinancialsIn, s: Session = Depends(db)):
            "source": payload.source}, prop.tenant_id)
     s.commit()
     return {"status": "ok", "financial_period_id": fp.id}
+
+
+# ── Loan document extraction (Claude-powered) ──────────────────────────────
+class ExtractLoanIn(BaseModel):
+    property_id: str
+    document_text: str
+    source_document: str
+
+
+@app.post("/loans/extract")
+def extract_loan(payload: ExtractLoanIn, s: Session = Depends(db)):
+    prop = s.get(Property, payload.property_id)
+    if not prop:
+        raise HTTPException(404, "Unknown property")
+
+    try:
+        extraction = extraction_pipeline.extract_loan_document(
+            payload.document_text)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+
+    loan_data = extraction["loan"]
+    rate_cap = loan_data["rate_cap_requirement"]
+    ext_options = loan_data["extension_options"]
+
+    loan = Loan(
+        property_id=prop.id,
+        lender=loan_data["lender"],
+        original_balance=loan_data["original_balance"],
+        current_balance=loan_data["original_balance"],
+        rate_type=RateType(loan_data["rate_type"]),
+        fixed_rate=loan_data["fixed_rate"],
+        floating_spread=loan_data["floating_spread"],
+        index_name=loan_data["index_name"],
+        io_period_end=(date.fromisoformat(loan_data["io_period_end"])
+                       if loan_data["io_period_end"] else None),
+        amortization_months=loan_data["amortization_months"],
+        origination_date=date.fromisoformat(loan_data["origination_date"]),
+        maturity_date=date.fromisoformat(loan_data["maturity_date"]),
+        rate_cap_expiry=(date.fromisoformat(rate_cap["expiry"])
+                         if rate_cap.get("expiry") else None),
+        extension_test_deadline=(
+            date.fromisoformat(loan_data["maturity_date"]) - relativedelta(
+                days=ext_options[0]["test_deadline_days_before_maturity"])
+            if ext_options else None),
+    )
+    s.add(loan)
+    s.flush()
+
+    terms = []
+    for cov in extraction["covenants"]:
+        noi_def = cov["noi_definition"] or {}
+        term = CovenantTerm(
+            loan_id=loan.id,
+            covenant_type=CovenantType(cov["covenant_type"]),
+            threshold=cov["threshold"],
+            direction=cov["direction"],
+            test_frequency=cov["test_frequency"],
+            noi_definition={k: v for k, v in noi_def.items()
+                           if v is not None},
+            cure_provision=cov["cure_provision"],
+            trigger_consequence=cov["trigger_consequence"],
+            source_document=payload.source_document,
+            source_pages=cov["source_pages"],
+            status=TermStatus.PENDING_VERIFICATION,
+        )
+        s.add(term)
+        terms.append(term)
+    s.flush()
+
+    audit(s, "system", "loan_extracted",
+          {"property": prop.name, "source_document": payload.source_document,
+           "covenant_count": len(terms)}, prop.tenant_id)
+    s.commit()
+
+    return {
+        "loan_id": loan.id,
+        "covenant_term_ids": [t.id for t in terms],
+        "reporting_deliverables": extraction["reporting_deliverables"],
+        "extraction": extraction,
+    }
 
 
 # ── W5: covenant test run ──────────────────────────────────────────────────

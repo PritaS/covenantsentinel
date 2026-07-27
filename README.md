@@ -11,8 +11,9 @@ MVP-critical n8n workflows.
 |---|---|
 | Data model (tenants → properties → loans → versioned covenant terms with source citations, financials, test results, alerts, append-only audit log) | ✅ `backend/app/models.py` |
 | **Covenant engine**: per-loan NOI definitions (basis, exclusions, imposed reserves, mgmt-fee floors), fixed/floating + IO/amortizing debt service, DSCR / debt-yield / LTV / occupancy tests, trend → projected-breach dating | ✅ `backend/app/covenant_engine.py` · 7 passing unit tests |
-| FastAPI: `/financials/ingest`, `/covenants/run-tests`, `/monitoring/upcoming` (deadline clock + **stale-data detection**), `/alerts/{id}/acknowledge`, `/audit` | ✅ `backend/app/main.py` |
+| FastAPI: `/financials/ingest`, `/covenants/run-tests`, `/monitoring/upcoming` (deadline clock + **stale-data detection**), `/alerts/{id}/acknowledge`, `/audit`, `/loans/extract` | ✅ `backend/app/main.py` |
 | Claude extraction prompt + citation-anchored schema (all extractions land `pending_verification`) | ✅ `backend/app/extraction/prompts.py` |
+| Live Claude extraction pipeline: chunking, structured-output extraction, multi-chunk reconciliation, `/loans/extract` persistence | ✅ `backend/app/extraction/pipeline.py` |
 | n8n workflows: W1 email ingestion, W2 nightly clock, W5 escalation + 24h ack loop | ✅ `n8n/*.json` (import into n8n, set env vars) |
 | Seeded demo: 3-loan portfolio, live DSCR breach + projected occupancy breach + rate-cap clock | ✅ `backend/seed_demo.py` |
 
@@ -20,7 +21,8 @@ MVP-critical n8n workflows.
 
 ```bash
 cd backend
-pip install fastapi sqlalchemy python-dateutil httpx uvicorn pytest
+pip install fastapi sqlalchemy python-dateutil httpx uvicorn pytest anthropic
+export ANTHROPIC_API_KEY=sk-ant-...   # required only for /loans/extract
 python seed_demo.py        # end-to-end covenant run with alerts
 python -m pytest tests/    # engine math tests
 uvicorn app.main:app --reload   # serve the API for n8n
@@ -35,8 +37,10 @@ drift is aggressive) so a demo shows every alert type in one run.
 2. **Next.js frontend** — Debt Command Center, Exceptions Queue, Verification
    Workbench, Loan Detail, Audit Trail (screens specced in the thesis doc).
 3. **Clerk auth** with mandatory MFA, org-per-sponsor tenancy.
-4. **Live extraction pipeline** — wire `extraction/prompts.py` to the Claude
-   API behind a Celery worker; add the merge/reconcile pass for long docs.
+4. **Async extraction jobs** — `/loans/extract` calls Claude synchronously
+   today; move it behind a Celery/RQ worker so large PDFs don't block the
+   request, and add a PDF/DOCX-to-text step ahead of the pipeline (it
+   currently takes plain `document_text`).
 5. **S3 document storage** (SSE-KMS, per-tenant prefixes) + presigned uploads.
 6. **`/financials/parse-attachment`** — AppFolio/Yardi/Excel format parsers
    feeding the canonical chart of accounts (W1 depends on this).

@@ -1,0 +1,109 @@
+{
+  "name": "W2 - Nightly Deadline Clock",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"triggerAtHour": 2}]}},
+      "name": "Cron 02:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.API_BASE}}/monitoring/upcoming",
+        "sendQuery": true,
+        "queryParameters": {"parameters": [
+          {"name": "tenant_id", "value": "={{$env.TENANT_ID}}"},
+          {"name": "horizon_days", "value": "180"}
+        ]},
+        "options": {"timeout": 30000}
+      },
+      "name": "Fetch Upcoming Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "name": "Split Items",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [440, -80]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Severity ladder: 180/90/60/30/7/1 days; stale data is its own HIGH.\nconst i = $input.item.json;\nlet sev = 'info';\nif (i.event === 'financials_stale') { sev = 'high'; }\nelse if (i.days_remaining <= 7) { sev = 'critical'; }\nelse if (i.days_remaining <= 30) { sev = 'high'; }\nelse if (i.days_remaining <= 60) { sev = 'medium'; }\nreturn { json: { ...i, severity: sev, channels: sev === 'critical' ? ['email','slack','sms'] : sev === 'high' ? ['email','slack'] : ['email'] } };"
+      },
+      "name": "Assign Severity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -80]
+    },
+    {
+      "parameters": {
+        "conditions": {"options": {"caseSensitive": true},
+          "conditions": [{"leftValue": "={{$json.severity}}",
+            "rightValue": "info", "operator": {"type": "string", "operation": "notEquals"}}]}
+      },
+      "name": "Alertable?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [880, -80]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@covenantsentinel.com",
+        "toEmail": "={{$env.CONTROLLER_EMAIL}}",
+        "subject": "=[{{$json.severity.toUpperCase()}}] {{$json.event}} — {{$json.property}}",
+        "text": "={{JSON.stringify($json, null, 2)}}"
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1100, -160]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.API_BASE}}/audit-hook",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {"parameters": [
+          {"name": "action", "value": "notification_sent"},
+          {"name": "detail", "value": "={{JSON.stringify($json)}}"}
+        ]}
+      },
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "channel": "#ops-pages",
+        "text": "=:rotating_light: W2 deadline clock FAILED to reach API — a missed alert is an existential failure. Investigate now. Error: {{$json.error}}"
+      },
+      "name": "Page Ops on API Failure",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [440, 160]
+    }
+  ],
+  "connections": {
+    "Cron 02:00": {"main": [[{"node": "Fetch Upcoming Events", "type": "main", "index": 0}]]},
+    "Fetch Upcoming Events": {"main": [
+      [{"node": "Split Items", "type": "main", "index": 0}],
+      [{"node": "Page Ops on API Failure", "type": "main", "index": 0}]
+    ]},
+    "Split Items": {"main": [[{"node": "Assign Severity", "type": "main", "index": 0}]]},
+    "Assign Severity": {"main": [[{"node": "Alertable?", "type": "main", "index": 0}]]},
+    "Alertable?": {"main": [[
+      {"node": "Send Email", "type": "main", "index": 0},
+      {"node": "Audit Log", "type": "main", "index": 0}
+    ]]}
+  },
+  "settings": {"executionOrder": "v1"}
+}

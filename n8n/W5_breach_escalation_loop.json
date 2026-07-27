@@ -1,0 +1,103 @@
+{
+  "name": "W5 - Breach Escalation & Acknowledgment Loop",
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "covenant-alert", "options": {}},
+      "name": "Webhook from FastAPI",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "rules": {"values": [
+          {"conditions": {"conditions": [{"leftValue": "={{$json.body.severity}}", "rightValue": "critical", "operator": {"type": "string", "operation": "equals"}}]}, "outputKey": "critical"},
+          {"conditions": {"conditions": [{"leftValue": "={{$json.body.severity}}", "rightValue": "high", "operator": {"type": "string", "operation": "equals"}}]}, "outputKey": "high"}
+        ]},
+        "fallbackOutput": "extra"
+      },
+      "name": "Severity Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@covenantsentinel.com",
+        "toEmail": "={{$env.CONTROLLER_EMAIL}},{{$env.PRINCIPAL_EMAIL}}",
+        "subject": "=[{{$json.body.severity.toUpperCase()}}] {{$json.body.title}}",
+        "text": "={{$json.body.body}}\n\nAcknowledge: {{$env.APP_BASE}}/alerts/{{$json.body.alert_id}}"
+      },
+      "name": "Notify (Email)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [440, -60]
+    },
+    {
+      "parameters": {"amount": 24, "unit": "hours"},
+      "name": "Wait 24h",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [660, -60]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.API_BASE}}/alerts/{{$json.body.alert_id}}",
+        "options": {}
+      },
+      "name": "Check Acknowledged",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -60]
+    },
+    {
+      "parameters": {"conditions": {"conditions": [{"leftValue": "={{$json.acknowledged_by}}", "rightValue": "", "operator": {"type": "string", "operation": "isEmpty"}}]}},
+      "name": "Still Unacknowledged?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, -60]
+    },
+    {
+      "parameters": {
+        "resource": "sms", "operation": "send",
+        "from": "={{$env.TWILIO_FROM}}", "to": "={{$env.PRINCIPAL_MOBILE}}",
+        "message": "=CovenantSentinel {{$json.severity}} alert unacknowledged 24h: {{$json.title}}. Log in now."
+      },
+      "name": "Escalate SMS to Principal",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1320, -120]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.API_BASE}}/audit-hook",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {"parameters": [
+          {"name": "action", "value": "escalation_step"},
+          {"name": "detail", "value": "={{JSON.stringify($json)}}"}
+        ]}
+      },
+      "name": "Audit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 20]
+    }
+  ],
+  "connections": {
+    "Webhook from FastAPI": {"main": [[{"node": "Severity Switch", "type": "main", "index": 0}]]},
+    "Severity Switch": {"main": [
+      [{"node": "Notify (Email)", "type": "main", "index": 0}],
+      [{"node": "Notify (Email)", "type": "main", "index": 0}],
+      [{"node": "Audit", "type": "main", "index": 0}]
+    ]},
+    "Notify (Email)": {"main": [[{"node": "Wait 24h", "type": "main", "index": 0}]]},
+    "Wait 24h": {"main": [[{"node": "Check Acknowledged", "type": "main", "index": 0}]]},
+    "Check Acknowledged": {"main": [[{"node": "Still Unacknowledged?", "type": "main", "index": 0}]]},
+    "Still Unacknowledged?": {"main": [
+      [{"node": "Escalate SMS to Principal", "type": "main", "index": 0}, {"node": "Audit", "type": "main", "index": 0}],
+      [{"node": "Audit", "type": "main", "index": 0}]
+    ]}
+  },
+  "settings": {"executionOrder": "v1"}
+}

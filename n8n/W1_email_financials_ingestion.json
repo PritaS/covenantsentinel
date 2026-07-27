@@ -1,0 +1,94 @@
+{
+  "name": "W1 - Email Financials Ingestion",
+  "nodes": [
+    {
+      "parameters": {"mailbox": "INBOX", "options": {"allowUnauthorizedCerts": false}},
+      "name": "IMAP Trigger (property aliases)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map alias -> property_id; extract attachments; period from subject or filename.\nconst to = $input.item.json.to || '';\nconst aliasMap = JSON.parse($env.ALIAS_MAP); // {\"property7@client...\": \"prop-uuid\"}\nconst propertyId = Object.entries(aliasMap).find(([a]) => to.includes(a))?.[1];\nif (!propertyId) { return { json: { route: 'unknown_alias', to } }; }\nreturn { json: { route: 'ok', property_id: propertyId, subject: $input.item.json.subject } };"
+      },
+      "name": "Resolve Property",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {"conditions": {"conditions": [{"leftValue": "={{$json.route}}", "rightValue": "ok", "operator": {"type": "string", "operation": "equals"}}]}},
+      "name": "Known Alias?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.API_BASE}}/financials/parse-attachment",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "options": {"timeout": 120000}
+      },
+      "name": "Parse via FastAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -80],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 10000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@covenantsentinel.com",
+        "toEmail": "={{$env.CONTROLLER_EMAIL}}",
+        "subject": "=Financials received — {{$json.property_name}} {{$json.period}}",
+        "text": "=Parsed and ingested. Covenant tests will run on next cycle."
+      },
+      "name": "Confirm Receipt",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [880, -160]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@covenantsentinel.com",
+        "toEmail": "={{$env.OPS_EMAIL}}",
+        "subject": "=[INGEST FAIL] Could not parse financials — manual review",
+        "text": "=Sender: {{$json.from}}\nSubject: {{$json.subject}}\nError: {{$json.error}}\nRouted to human review queue."
+      },
+      "name": "Dead-letter to Human Review",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@covenantsentinel.com",
+        "toEmail": "={{$json.from}}",
+        "subject": "Re: could not route your financials",
+        "text": "This address didn't match a configured property alias. Please resend to the property-specific address or contact support."
+      },
+      "name": "Reply Unknown Alias",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [660, 160]
+    }
+  ],
+  "connections": {
+    "IMAP Trigger (property aliases)": {"main": [[{"node": "Resolve Property", "type": "main", "index": 0}]]},
+    "Resolve Property": {"main": [[{"node": "Known Alias?", "type": "main", "index": 0}]]},
+    "Known Alias?": {"main": [
+      [{"node": "Parse via FastAPI", "type": "main", "index": 0}],
+      [{"node": "Reply Unknown Alias", "type": "main", "index": 0}]
+    ]},
+    "Parse via FastAPI": {"main": [
+      [{"node": "Confirm Receipt", "type": "main", "index": 0}],
+      [{"node": "Dead-letter to Human Review", "type": "main", "index": 0}]
+    ]}
+  },
+  "settings": {"executionOrder": "v1"}
+}
